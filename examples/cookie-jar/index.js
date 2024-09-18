@@ -1,9 +1,20 @@
 import { createServer, startServer } from '#shared';
 import { readFile } from 'fs/promises';
+import cookieParser from 'cookie-parser';
+import crypto from 'crypto';
 
 import db from './database.js';
 
+//Don't hardcode like this. Make sure it is at least in an environment variable
+const cookieSecret = 'super-secret';
+
 const app = createServer({ cookies: false });
+app.use(cookieParser(cookieSecret));
+
+//don't ever give users the same session token
+const generateSessionId = () => {
+  return crypto.randomBytes(16).toString('hex');
+}
 
 app.get('/', (req, res) => {
   if (!req.cookies) res.send('Cookies are disabled.');
@@ -17,7 +28,8 @@ app.get('/', (req, res) => {
 app.get('/login', async (req, res) => {
   const loginPage = await readFile('./pages/login.html', 'utf-8');
 
-  if (req.cookies.username) {
+  //this needs to be signedCookies instead of cookies
+  if (req.signedCookies.username) {
     res.redirect('/profile');
   }
 
@@ -40,8 +52,18 @@ app.post('/login', async (req, res) => {
     [username, password]
   );
 
+  //adding the session to the user on the login
   if (user) {
-    res.cookie('username', username);
+    const sessionId = generateSessionId();
+    await db.run('INSERT INTO sessions (id, username) VALUES (?, ?)', [
+      sessionId, 
+      username,//this is the other column for getting the username from the session
+    ]);
+    res.cookie('sessionId', sessionId, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      signed: true,
+    });
     res.redirect('/profile');
   } else {
     res.status(403).redirect('/login?error=Invalid login credentials.');
@@ -57,13 +79,15 @@ app.post('/logout', (_, res) => {
 app.get('/profile', async (req, res) => {
   res.locals.title = 'Profile';
 
-  const username = req.cookies.username;
+  const sessionId = req.signedCookies.sessionId;
 
-  if (!username) {
+  //kick them out if they don't have a session
+  if (!sessionId) {
     return res.redirect('/login?error=Please login to view your profile.');
   }
 
-  const user = await db.get('SELECT * FROM users WHERE username = ?', username);
+  const session = await db.get('SELECT * FROM sessions WHERE id = ?', sessionId);
+  const user = await db.get('SELECT * FROM users WHERE username = ?', session.username);
 
   if (user && user.username) {
     res.send(
